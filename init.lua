@@ -91,7 +91,7 @@ vim.g.mapleader = ' '
 vim.g.maplocalleader = ' '
 
 -- Set to true if you have a Nerd Font installed and selected in the terminal
-vim.g.have_nerd_font = false
+vim.g.have_nerd_font = true
 
 -- [[ Setting options ]]
 -- See `:help vim.o`
@@ -120,6 +120,14 @@ vim.o.showmode = false
 
 -- Enable break indent
 vim.o.breakindent = true
+
+-- Indentation: default to 4 spaces (matches adsp C and Python HIL code).
+-- guess-indent.nvim overrides these per-file when a file's actual style differs,
+-- and the built-in `make` ftplugin forces real tabs for Makefiles regardless.
+vim.o.expandtab = true -- Tab inserts spaces, not a tab character
+vim.o.tabstop = 4 -- A tab renders as 4 columns
+vim.o.softtabstop = 4 -- Tab/Backspace operate on 4 spaces
+vim.o.shiftwidth = 4 -- Auto-indent and >> / << use 4 spaces
 
 -- Save undo history
 vim.o.undofile = true
@@ -671,9 +679,26 @@ require('lazy').setup({
       --  - settings (table): Override the default settings passed when initializing the server.
       --        For example, to see the options for `lua_ls`, you could go to: https://luals.github.io/wiki/settings/
       local servers = {
-        -- clangd = {},
+        clangd = {},
         -- gopls = {},
-        -- pyright = {},
+        basedpyright = {
+          settings = {
+            basedpyright = {
+              analysis = {
+                typeCheckingMode = 'standard',
+                diagnosticSeverityOverrides = {
+                  reportUnknownMemberType = 'none',
+                  reportUnknownArgumentType = 'none',
+                  reportUnknownVariableType = 'none',
+                  reportUnknownParameterType = 'none',
+                  reportUnknownLambdaType = 'none',
+                  reportMissingTypeStubs = 'none',
+                  reportAny = 'none',
+                },
+              },
+            },
+          },
+        },
         -- rust_analyzer = {},
         -- ... etc. See `:help lspconfig-all` for a list of all the pre-configured LSPs
         --
@@ -869,18 +894,14 @@ require('lazy').setup({
       -- the rust implementation via `'prefer_rust_with_warning'`
       --
       -- See :h blink-cmp-config-fuzzy for more information
-      fuzzy = { implementation = 'lua' },
+      fuzzy = { implementation = 'prefer_rust_with_warning' },
 
       -- Shows a signature help window while you type arguments for a function
       signature = { enabled = true },
     },
   },
 
-  { -- You can easily change to a different colorscheme.
-    -- Change the name of the colorscheme plugin below, and then
-    -- change the command in the config to whatever the name of that colorscheme is.
-    --
-    -- If you want to see what colorschemes are already installed, you can use `:Telescope colorscheme`.
+  { -- Default colorscheme. Browse with <leader>ut
     'folke/tokyonight.nvim',
     priority = 1000, -- Make sure to load this before all the other start plugins.
     config = function()
@@ -891,11 +912,327 @@ require('lazy').setup({
         },
       }
 
-      -- Load the colorscheme here.
-      -- Like many other themes, this one has different styles, and you could load
-      -- any other, such as 'tokyonight-storm', 'tokyonight-moon', or 'tokyonight-day'.
-      vim.cmd.colorscheme 'tokyonight-night'
+      -- Explicit light schemes. Everything else we care about is dark.
+      -- Base names (tokyonight, gruvbox, catppuccin, …) follow sticky vim.o.background —
+      -- that's why the same name looked light or dark depending on the previous theme.
+      local light_schemes = {
+        ['tokyonight-day'] = true,
+        ['catppuccin-latte'] = true,
+        ['rose-pine-dawn'] = true,
+        ['kanagawa-lotus'] = true,
+        ['dawnfox'] = true,
+        ['dayfox'] = true,
+        ['gruvbox-light'] = true, -- virtual name from picker
+      }
+
+      -- Virtual picker entries → real colorscheme + forced background
+      local virtual_schemes = {
+        ['gruvbox-dark'] = { scheme = 'gruvbox', background = 'dark' },
+        ['gruvbox-light'] = { scheme = 'gruvbox', background = 'light' },
+      }
+
+      local function scheme_background(name)
+        if light_schemes[name] then
+          return 'light'
+        end
+        if virtual_schemes[name] then
+          return virtual_schemes[name].background
+        end
+        return 'dark'
+      end
+
+      -- Persist last-picked theme (and focus mode) across restarts
+      local state_dir = vim.fn.stdpath 'state'
+      local colorscheme_file = state_dir .. '/colorscheme'
+      local focus_mode_file = state_dir .. '/focus_mode'
+
+      local function save_colorscheme(name)
+        vim.fn.mkdir(state_dir, 'p')
+        vim.fn.writefile({ name }, colorscheme_file)
+      end
+
+      local function load_saved_colorscheme()
+        if vim.fn.filereadable(colorscheme_file) == 1 then
+          local lines = vim.fn.readfile(colorscheme_file)
+          if lines[1] and lines[1] ~= '' then
+            return lines[1]
+          end
+        end
+        return nil
+      end
+
+      local function save_focus_mode()
+        vim.fn.mkdir(state_dir, 'p')
+        vim.fn.writefile({ vim.g.focus_mode and '1' or '0' }, focus_mode_file)
+      end
+
+      local function load_saved_focus_mode()
+        if vim.fn.filereadable(focus_mode_file) == 1 then
+          local lines = vim.fn.readfile(focus_mode_file)
+          if lines[1] == '0' then
+            return false
+          end
+        end
+        return true -- default on
+      end
+
+      local function apply_colorscheme(name, opts)
+        opts = opts or {}
+        local virtual = virtual_schemes[name]
+        local real = virtual and virtual.scheme or name
+        local bg = scheme_background(name)
+        vim.o.background = bg
+        local ok = pcall(vim.cmd.colorscheme, real)
+        if not ok then
+          -- Lazy themes may not be installed yet; fall back to default
+          vim.o.background = 'dark'
+          pcall(vim.cmd.colorscheme, 'tokyonight-storm')
+          return false
+        end
+        if opts.persist ~= false then
+          save_colorscheme(name)
+        end
+        return true
+      end
+
+      -- Restore last theme (or default storm). persist=false so we don't rewrite on every boot.
+      local saved = load_saved_colorscheme()
+      if not saved or not apply_colorscheme(saved, { persist = false }) then
+        apply_colorscheme('tokyonight-storm', { persist = false })
+      end
+
+      -- Focus mode: dim inactive windows + stronger cursorline (toggle with <leader>uf)
+      vim.g.focus_mode = load_saved_focus_mode()
+
+      -- Paint the WHOLE mini.statusline (mode + filename + fileinfo), not just the mode pill.
+      local function apply_ui_highlights()
+        local light = vim.o.background == 'light'
+        local hl = vim.api.nvim_set_hl
+        if light then
+          hl(0, 'StatusLine', { fg = '#2e3440', bg = '#d08770', bold = true })
+          hl(0, 'StatusLineNC', { fg = '#4c566a', bg = '#e5e9f0' })
+          hl(0, 'WinSeparator', { fg = '#d08770', bg = 'NONE' })
+          hl(0, 'MiniStatuslineModeNormal', { fg = '#2e3440', bg = '#d08770', bold = true })
+          hl(0, 'MiniStatuslineModeInsert', { fg = '#2e3440', bg = '#a3be8c', bold = true })
+          hl(0, 'MiniStatuslineModeVisual', { fg = '#2e3440', bg = '#b48ead', bold = true })
+          hl(0, 'MiniStatuslineModeReplace', { fg = '#eceff4', bg = '#bf616a', bold = true })
+          hl(0, 'MiniStatuslineModeCommand', { fg = '#2e3440', bg = '#ebcb8b', bold = true })
+          hl(0, 'MiniStatuslineModeOther', { fg = '#2e3440', bg = '#88c0d0', bold = true })
+          hl(0, 'MiniStatuslineDevinfo', { fg = '#2e3440', bg = '#e5a080' })
+          hl(0, 'MiniStatuslineFilename', { fg = '#2e3440', bg = '#e5a080', bold = true })
+          hl(0, 'MiniStatuslineFileinfo', { fg = '#2e3440', bg = '#e5a080' })
+          hl(0, 'MiniStatuslineInactive', { fg = '#4c566a', bg = '#e5e9f0' })
+          if vim.g.focus_mode then
+            hl(0, 'NormalNC', { fg = '#4c566a', bg = '#eceff4' })
+            hl(0, 'CursorLine', { bg = '#d8dee9' })
+          else
+            hl(0, 'NormalNC', { link = 'Normal' })
+            hl(0, 'CursorLine', { bg = '#e5e9f0' })
+          end
+        else
+          hl(0, 'StatusLine', { fg = '#1a1b26', bg = '#ff9e64', bold = true })
+          hl(0, 'StatusLineNC', { fg = '#565f89', bg = '#16161e' })
+          hl(0, 'WinSeparator', { fg = '#ff9e64', bg = 'NONE' })
+          hl(0, 'MiniStatuslineModeNormal', { fg = '#1a1b26', bg = '#ff9e64', bold = true })
+          hl(0, 'MiniStatuslineModeInsert', { fg = '#1a1b26', bg = '#9ece6a', bold = true })
+          hl(0, 'MiniStatuslineModeVisual', { fg = '#1a1b26', bg = '#bb9af7', bold = true })
+          hl(0, 'MiniStatuslineModeReplace', { fg = '#1a1b26', bg = '#f7768e', bold = true })
+          hl(0, 'MiniStatuslineModeCommand', { fg = '#1a1b26', bg = '#e0af68', bold = true })
+          hl(0, 'MiniStatuslineModeOther', { fg = '#1a1b26', bg = '#7dcfff', bold = true })
+          hl(0, 'MiniStatuslineDevinfo', { fg = '#c0caf5', bg = '#3d3a4a' })
+          hl(0, 'MiniStatuslineFilename', { fg = '#1a1b26', bg = '#ff9e64', bold = true })
+          hl(0, 'MiniStatuslineFileinfo', { fg = '#c0caf5', bg = '#3d3a4a' })
+          hl(0, 'MiniStatuslineInactive', { fg = '#565f89', bg = '#16161e' })
+          if vim.g.focus_mode then
+            hl(0, 'NormalNC', { fg = '#a9b1d6', bg = '#16161e' })
+            hl(0, 'CursorLine', { bg = '#292e42' })
+          else
+            hl(0, 'NormalNC', { link = 'Normal' })
+            hl(0, 'CursorLine', { bg = '#1f2335' })
+          end
+        end
+      end
+
+      -- Safety net: known light schemes always force background=light; known dark force dark.
+      local known_dark = {
+        ['tokyonight-storm'] = true,
+        ['tokyonight-night'] = true,
+        ['tokyonight-moon'] = true,
+        ['catppuccin-mocha'] = true,
+        ['catppuccin-macchiato'] = true,
+        ['catppuccin-frappe'] = true,
+        ['rose-pine-main'] = true,
+        ['rose-pine-moon'] = true,
+        ['kanagawa-wave'] = true,
+        ['kanagawa-dragon'] = true,
+        nightfox = true,
+        duskfox = true,
+        nordfox = true,
+        terafox = true,
+        carbonfox = true,
+      }
+
+      vim.api.nvim_create_autocmd('ColorScheme', {
+        group = vim.api.nvim_create_augroup('ui-highlights', { clear = true }),
+        callback = function(args)
+          local name = args.match
+          if light_schemes[name] then
+            vim.o.background = 'light'
+          elseif known_dark[name] then
+            vim.o.background = 'dark'
+          end
+          vim.schedule(apply_ui_highlights)
+        end,
+      })
+      apply_ui_highlights()
+      vim.api.nvim_create_autocmd('User', {
+        pattern = 'VeryLazy',
+        group = vim.api.nvim_create_augroup('ui-highlights-late', { clear = true }),
+        callback = apply_ui_highlights,
+      })
+
+      -- Curated theme list (no sticky/ambiguous base names)
+      local schemes = {
+        'tokyonight-storm',
+        'tokyonight-night',
+        'tokyonight-moon',
+        'tokyonight-day',
+        'catppuccin-mocha',
+        'catppuccin-macchiato',
+        'catppuccin-frappe',
+        'catppuccin-latte',
+        'gruvbox-dark',
+        'gruvbox-light',
+        'rose-pine-main',
+        'rose-pine-moon',
+        'rose-pine-dawn',
+        'kanagawa-wave',
+        'kanagawa-dragon',
+        'kanagawa-lotus',
+        'nightfox',
+        'duskfox',
+        'nordfox',
+        'terafox',
+        'carbonfox',
+        'dawnfox',
+        'dayfox',
+      }
+
+      -- <leader>ut = theme picker (sets background before apply so names stay consistent)
+      vim.keymap.set('n', '<leader>ut', function()
+        local pickers = require 'telescope.pickers'
+        local finders = require 'telescope.finders'
+        local conf = require('telescope.config').values
+        local actions = require 'telescope.actions'
+        local action_state = require 'telescope.actions.state'
+
+        local prev_scheme = vim.g.colors_name
+        local prev_bg = vim.o.background
+
+        pickers
+          .new({}, {
+            prompt_title = 'Colorscheme  (Enter=keep  Esc=cancel)',
+            finder = finders.new_table { results = schemes },
+            sorter = conf.generic_sorter {},
+            attach_mappings = function(prompt_bufnr, map)
+              -- Live preview as you move (debounce-free; fine for local schemes)
+              local function preview_selection()
+                local entry = action_state.get_selected_entry()
+                if entry then
+                  pcall(apply_colorscheme, entry[1], { persist = false })
+                end
+              end
+
+              map('i', '<C-n>', function()
+                actions.move_selection_next(prompt_bufnr)
+                preview_selection()
+              end)
+              map('i', '<C-p>', function()
+                actions.move_selection_previous(prompt_bufnr)
+                preview_selection()
+              end)
+              map('i', '<Down>', function()
+                actions.move_selection_next(prompt_bufnr)
+                preview_selection()
+              end)
+              map('i', '<Up>', function()
+                actions.move_selection_previous(prompt_bufnr)
+                preview_selection()
+              end)
+              map('n', 'j', function()
+                actions.move_selection_next(prompt_bufnr)
+                preview_selection()
+              end)
+              map('n', 'k', function()
+                actions.move_selection_previous(prompt_bufnr)
+                preview_selection()
+              end)
+
+              local function keep()
+                local entry = action_state.get_selected_entry()
+                actions.close(prompt_bufnr)
+                if entry then
+                  apply_colorscheme(entry[1]) -- saves to ~/.local/state/nvim/colorscheme
+                  vim.notify('Theme: ' .. entry[1] .. ' (' .. vim.o.background .. ', saved)', vim.log.levels.INFO)
+                end
+              end
+              local function cancel()
+                actions.close(prompt_bufnr)
+                -- Restore previous without overwriting the saved preference
+                if prev_scheme then
+                  vim.o.background = prev_bg
+                  pcall(vim.cmd.colorscheme, prev_scheme)
+                end
+              end
+              map('i', '<CR>', keep)
+              map('n', '<CR>', keep)
+              map('i', '<Esc>', cancel)
+              map('n', '<Esc>', cancel)
+              -- preview first entry immediately
+              vim.schedule(preview_selection)
+              return true
+            end,
+          })
+          :find()
+      end, { desc = '[U]I [T]heme picker' })
+
+      -- <leader>uf = toggle focus mode (dim inactive panes / stronger cursorline)
+      vim.keymap.set('n', '<leader>uf', function()
+        vim.g.focus_mode = not vim.g.focus_mode
+        save_focus_mode()
+        apply_ui_highlights()
+        vim.notify('Focus mode: ' .. (vim.g.focus_mode and 'on' or 'off') .. ' (saved)', vim.log.levels.INFO)
+      end, { desc = '[U]I [F]ocus mode toggle' })
     end,
+  },
+
+  -- Extra colorschemes (lazy-load on first :colorscheme). Browse with <leader>ut
+  {
+    'catppuccin/nvim',
+    name = 'catppuccin',
+    lazy = true,
+    opts = { flavour = 'mocha' },
+  },
+  {
+    'ellisonleao/gruvbox.nvim',
+    lazy = true,
+    opts = {},
+  },
+  {
+    'rose-pine/neovim',
+    name = 'rose-pine',
+    lazy = true,
+    opts = {},
+  },
+  {
+    'rebelot/kanagawa.nvim',
+    lazy = true,
+    opts = {},
+  },
+  {
+    'EdenEast/nightfox.nvim', -- nightfox, duskfox, nordfox, terafox, carbonfox, dawnfox, dayfox
+    lazy = true,
+    opts = {},
   },
 
   -- Highlight todo, notes, etc in comments
@@ -940,6 +1277,7 @@ require('lazy').setup({
   },
   { -- Highlight, edit, and navigate code
     'nvim-treesitter/nvim-treesitter',
+    branch = 'master',
     build = ':TSUpdate',
     main = 'nvim-treesitter.configs', -- Sets main module to use for opts
     -- [[ Configure Treesitter ]] See `:help nvim-treesitter`
@@ -954,7 +1292,8 @@ require('lazy').setup({
         --  the list of additional_vim_regex_highlighting and disabled languages for indent.
         additional_vim_regex_highlighting = { 'ruby' },
       },
-      indent = { enable = true, disable = { 'ruby' } },
+      -- Disable treesitter indent for C/C++: cindent handles braces/if better while typing.
+      indent = { enable = true, disable = { 'ruby', 'c', 'cpp' } },
     },
     -- There are additional nvim-treesitter modules that you can use to interact
     -- with nvim-treesitter. You should go explore a few and see what interests you:
@@ -974,11 +1313,11 @@ require('lazy').setup({
   --  Uncomment any of the lines below to enable them (you will need to restart nvim).
   --
   -- require 'kickstart.plugins.debug',
-  -- require 'kickstart.plugins.indent_line',
+  require 'kickstart.plugins.indent_line',
   -- require 'kickstart.plugins.lint',
-  -- require 'kickstart.plugins.autopairs',
-  -- require 'kickstart.plugins.neo-tree',
-  -- require 'kickstart.plugins.gitsigns', -- adds gitsigns recommend keymaps
+  require 'kickstart.plugins.autopairs',
+  require 'kickstart.plugins.neo-tree',
+  require 'kickstart.plugins.gitsigns', -- adds gitsigns recommend keymaps
 
   -- NOTE: The import below can automatically add your own plugins, configuration, etc from `lua/custom/plugins/*.lua`
   --    This is the easiest way to modularize your config.
